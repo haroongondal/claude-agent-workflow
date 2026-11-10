@@ -24,7 +24,7 @@ Read this file completely first. Trust the verified facts below and do not redo 
 - `coord@claude-agent-workflow` is installed at user scope and project scope (apps-hub). Queues in `~/.claude/coord/queues.json` carried over.
 - `cd-engineering-tools@claudeai-organization-library` is installed at user scope and takes precedence over the old `cd-engineering-tools@synced` copy. It contains both skills, the hook and `filelock` with its executable bit.
 - Synced plugins from claude.ai cannot be uninstalled by the CLI. `cas-integration@synced` and `channel-dynamics-design@synced` are disabled on this machine. CD Engineering Tools provides `integrating-with-cas` and `channel-dynamics-ui`.
-- Deleted by owner's request: superpowers `dispatching-parallel-agents` in the 7.0.0 and 6.4.1 caches. A superpowers update restores it. Its useful content (independence test, one-response dispatch, prompt checklist, integration step) is now in `parallel-agents-coord` sections 2, 5 and 9.
+- Deleted by owner's request: superpowers `dispatching-parallel-agents` in the 7.0.0 and 6.4.1 caches. A superpowers update restores it. Its useful content (independence test, one-response dispatch, prompt checklist, integration step) is now in `parallel-agents-coord` sections 2, 5 and 9. If a superpowers update brings it back: the owner's `~/.claude/settings.json` has `permissions.deny` `Skill(superpowers:dispatching-parallel-agents)` (tested 2026-11-10: a deny rule matches a plugin skill by `plugin:skill` name and the model sees "Skill execution blocked by permission rules"), and our skill's description says it replaces that one. Plugins cannot ship permission rules, so teammates get only the description.
 - Tests: `python3 plugins/coord/bin/coord_test.py` (5), `node --test plugins/agent-workflow/hooks/context-handoff.test.mjs` (5).
 
 ## File map
@@ -36,6 +36,7 @@ Read this file completely first. Trust the verified facts below and do not redo 
 
 ## Session log
 
+- 2026-11-10 (later): added the replace-superpowers sentence to the skill description (agent-workflow 1.0.2, CD Engineering Tools 0.2.2) and the deny rule above. CAS repo `CLAUDE.md` now has a section telling agents to update the `integrating-with-cas` and `channel-dynamics-ui` skills in the plugin when CAS changes.
 - 2026-11-10: moved everything here, published CD Engineering Tools 0.2.0, switched coord to the new marketplace, removed the global skill and hook copies. Then added the missing instructions to `parallel-agents-coord` (agent-workflow 1.0.1, CD Engineering Tools 0.2.1).
 
 ## Current state and next step
