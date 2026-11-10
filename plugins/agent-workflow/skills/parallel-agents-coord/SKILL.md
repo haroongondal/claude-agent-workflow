@@ -1,6 +1,6 @@
 ---
 name: parallel-agents-coord
-description: Use when you are about to run several subagents in parallel inside ONE repo or worktree (subagent-driven development, a fix wave, parallel reviews), when deciding which tasks run in parallel and how many agents to start, or when the owner asks to dispatch more agents at once. Keeps the speed-up without lost edits, mixed commits, polluted test runs or lost accuracy. Covers what coord can and cannot do between subagents, the filelock helper, planning and the shared-file list, splitting shared files, communication, waiting without burning tokens, fix waves, the dispatch paragraph, measured costs.
+description: Use when facing 2 or more independent tasks (failing tests in different files, separate bugs, several reviews) that subagents could work on at once, when you are about to run several subagents in parallel inside ONE repo or worktree (subagent-driven development, a fix wave), when deciding whether tasks are independent, which run in parallel and how many agents to start, or when the owner asks to dispatch more agents at once. Keeps the speed-up without lost edits, mixed commits, polluted test runs or lost accuracy. Covers the independence test, how to dispatch, what coord can and cannot do between subagents, the filelock helper, the shared-file list, splitting shared files, agent prompts, communication, waiting without burning tokens, integrating results, fix waves, measured costs.
 ---
 
 # Parallel agents in one worktree
@@ -20,6 +20,12 @@ Checked in the coord plugin, version 1.0.0 (`bin/coord` and `hooks/hooks.json`; 
 
 ## 2. Plan the run (controller, before any dispatch)
 
+First, is the work independent at all? Give one agent each problem that can be understood without the others' context: different test files with different root causes, separate subsystems, separate bugs. Do not split when:
+- the failures are related (fixing one may fix the others: investigate them together first);
+- you need the whole system's state to understand any of them;
+- you do not yet know what is broken (exploratory debugging stays with one agent);
+- the agents would edit the same code or use the same resource, and the table below gives no way to stagger them.
+
 Decide for each task, and record it in the ledger:
 
 | Run it | When |
@@ -29,6 +35,8 @@ Decide for each task, and record it in the ledger:
 | Alone | Chrome, perf, device and live-network runs; a task that needs another task's committed output (an interface, a generated file); tasks that rewrite the same functions. |
 
 How many agents: the tasks that are ready now (their inputs are committed) and fit the table, capped at two in shared-file phases and one exclusive run. Count the reviews too: every implementation gets an independent review as its commit lands, and Sieve averaged one fix round per task. Start the rest as slots free.
+
+How to dispatch: send all the Agent calls that may run together in ONE response. They then run concurrently; one call per response runs them one after another. Use fresh agents (`general-purpose`) with a prompt you write, so each starts with exactly the context it needs and your context stays free for coordination. A fork copies your whole context; use one only when the task needs it.
 
 Then make the partition table: agent, OWNER name, owned files (only this agent edits them), shared files (two or more agents edit them, such as README, the main test runner, the build script, the manifest, `package.json` test lists, index files and handoff docs), and order (lock-free work first, shared edits last). Write the shared list to `<workspace>/shared-files.txt`, one absolute path per line, outside the lock folder, and give every agent its path.
 
@@ -66,6 +74,7 @@ Rules for every agent:
 
 - Commit by pathspec only: `git commit -m "..." -- <your paths>`. Never use `git add -A`, and never commit a path you do not own or hold. Retry on `index.lock`. Every parallel commit in Sieve contained only its own agent's paths.
 - Review each commit as `<sha>^..<sha>`, never `BASE..HEAD`, because commits interleave. Fix rounds resume the same implementer by SendMessage. Scoped re-reviews are read-only and run alongside the next implementer. Do not skip them: in Sieve a fix round that "passed" still let the perf gate pass on an early-exit path, and only the re-review caught it.
+- When agents return: read each report, check that no two edited the same code, run the full suite once everything is committed, and spot-check the changes. An agent can make a systematic error, and "I fixed it" is a claim, not evidence.
 - The shared tree is a shared test environment. Three Sieve runs failed or flickered because of other agents' uncommitted edits: a unit-test run, and two e2e gates at 148/149 and 156/157. A red or green result in the shared tree is a hint, not evidence.
 - Run the final gate from a clean export of the committed HEAD, after every agent has committed: `git archive HEAD | tar -x -C <empty dir>`, install from the lockfile, then run the full gate there under the run lock, with nothing else using Chrome or the device. The Sieve gate ran this way alongside a read-only re-review; its one e2e flake (170/171) was not caused by anyone's uncommitted edits. Never build into the shared `dist/` while a gate or perf run reads it.
 
@@ -100,6 +109,12 @@ Sieve's final fix wave started while a 31-minute YouTube measurement still held 
 8. Re-review each fix commit by its sha.
 
 ## 9. Dispatch paragraph (paste into every parallel implementer prompt; fill the blanks)
+
+Besides this paragraph, each prompt needs four things, or the agent gets lost or wanders:
+- One specific scope ("fix `agent-tool-abort.test.ts`", not "fix all the tests"), and the context pasted in: the failing test names and error messages, the files, what the code should do.
+- A clear goal and the method you want ("find the root cause; do not just raise timeouts").
+- Constraints ("change production code only in `src/abort/`", "do not touch other tests").
+- The output you expect: a text report with the root cause, what changed and the commit shas.
 
 "Other agents edit this same worktree and branch right now. Do not run coord commands: coord cannot tell subagents of one session apart. Lock helper: <ABS PATH>/filelock, with FILELOCK_ROOT=<LOCK DIR>. `filelock acquire KEY OWNER [WAIT_S, at most 540]` (exit 0 = yours, 3 = timed out, prints the holder), `filelock release KEY OWNER`, `filelock status`. Your OWNER is <name>. Your files: <owned>. Shared files, which you must lock before editing, are listed in <shared-files.txt>; re-read it before editing any file not in your list, and message the controller (<id>) before editing a file that is on neither list. Do lock-free work first. Edit shared files last, in one short batch, locking them in alphabetical order and holding each lock only until your pathspec commit (`git commit -m '...' -- <paths>`). If a lock is busy, retry with WAIT_S 1 and keep working on other things; block only when nothing else is left. Never hold a shared-file lock during a Chrome, perf, device or live run: commit and release first, then take only <RUN KEY>. Put new checks in new module files registered by one line. Other agents (id, OWNER): <list>. Release every lock before you end your turn. If you are blocked on another agent and have nothing else to do, end your turn with 'BLOCKED: <what> from <whom>'. Return the report as text, with commits, files touched, shared files touched and locks held (none)."
 
