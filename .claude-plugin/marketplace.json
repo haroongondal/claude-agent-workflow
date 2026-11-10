@@ -1,0 +1,17 @@
+{
+  "name": "claude-agent-workflow",
+  "description": "Tools for running several Claude Code sessions and subagents at once without collisions.",
+  "owner": { "name": "haroongondal" },
+  "plugins": [
+    {
+      "name": "coord",
+      "source": "./plugins/coord",
+      "description": "Lets several Claude Code sessions take turns on the same file, folder, app or device."
+    },
+    {
+      "name": "agent-workflow",
+      "source": "./plugins/agent-workflow",
+      "description": "Skills for parallel subagents in one repo and for phase-sized builds, plus a hook that warns at 85% of the context window."
+    }
+  ]
+}

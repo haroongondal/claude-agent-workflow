@@ -1,0 +1,11 @@
+{
+  "description": "Warn at 85% of the context window (main session and subagents) so work stops cleanly",
+  "hooks": {
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/context-handoff.mjs\"", "timeout": 10 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/context-handoff.mjs\"", "timeout": 10 }] }
+    ]
+  }
+}

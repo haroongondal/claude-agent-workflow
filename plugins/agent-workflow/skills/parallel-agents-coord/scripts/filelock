@@ -1,0 +1,29 @@
+#!/bin/bash
+# Locks for subagents of ONE Claude session (coord sees them all as one holder). A lock is a symlink whose target
+# is "OWNER|EPOCH": one atomic, exclusive syscall, so never two winners and never a lock without an owner.
+USAGE='usage: filelock acquire KEY OWNER [WAIT_S=540]  exit 0 yours (or already yours), 3 timed out (prints holder and age)
+       filelock release KEY OWNER               exit 0 released, 4 not held by OWNER
+       filelock break KEY                       controller only: free a lock whose holder finished or died
+       filelock status                          every lock with its holder and age
+KEY: an absolute file path, or the app folder for build/test/browser runs. Set FILELOCK_ROOT to a per-task folder.
+WAIT_S stays under the Bash tool limit (600 s) so a timeout returns exit 3 instead of being killed.'
+ROOT="${FILELOCK_ROOT:-${TMPDIR:-/tmp}/filelock}"; mkdir -p "$ROOT"
+cmd="$1"; key="$2"; owner="$3"; wait_s="${4:-540}"
+link="$ROOT/$(printf '%s' "$key" | tr '/ ' '__')"
+who() { local v; v=$(readlink "$1" 2>/dev/null) || { [ -e "$1" ] && echo "unknown (old folder-style lock: filelock break it)" || echo nobody; return; }
+        echo "${v%|*} for $(( ($(date +%s) - ${v##*|}) / 60 )) min"; }
+mine() { v=$(readlink "$link" 2>/dev/null) && [ "${v%|*}" = "$owner" ]; }
+case "$cmd" in acquire|release) [ -n "$key" ] && [ -n "$owner" ] || { echo "$USAGE"; exit 2; } ;;
+  break) [ -n "$key" ] || { echo "$USAGE"; exit 2; } ;; esac
+case "$cmd" in
+  acquire)
+    end=$((SECONDS + wait_s))
+    until mine || ln -sn "$owner|$(date +%s)" "$link" 2>/dev/null && mine; do
+      [ "$SECONDS" -ge "$end" ] && { echo "timed out; held by $(who "$link")"; exit 3; }
+      sleep 5
+    done; exit 0 ;;
+  release) mine || { echo "not held by $owner"; exit 4; }; rm "$link"; exit 0 ;;
+  break) echo "freed $key (was held by $(who "$link"))"; rm -rf "$link"; exit 0 ;;
+  status) for l in "$ROOT"/*; do { [ -e "$l" ] || [ -L "$l" ]; } && echo "$(basename "$l")  held by $(who "$l")"; done; exit 0 ;;
+  *) echo "$USAGE"; exit 2 ;;
+esac

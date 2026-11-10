@@ -1,0 +1,12 @@
+{
+  "name": "coord",
+  "version": "1.0.0",
+  "description": "Lets several Claude Code sessions take turns on the same file, folder, app or device: a shared queue, automatic file claims, and lending a device while you wait on it.",
+  "author": {
+    "name": "haroongondal"
+  },
+  "homepage": "https://github.com/haroongondal/claude-agent-workflow",
+  "repository": "https://github.com/haroongondal/claude-agent-workflow",
+  "license": "MIT",
+  "keywords": ["sessions", "queue", "locking", "devices", "hooks"]
+}

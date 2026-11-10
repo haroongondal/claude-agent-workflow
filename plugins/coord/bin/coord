@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""coord: one queue per file, folder, app or device shared by Claude Code sessions.
+
+Entry states: hold (using it), lent (holder is waiting on it and lets the next
+session borrow it), borrow (using it on loan), wait (queued). The first entry is
+the holder. The protocol is in ../PROTOCOL.md, injected into every session at
+start; `coord help` lists commands.
+"""
+import fcntl
+import glob
+import json
+import os
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+DIR = os.environ.get("COORD_DIR", os.path.join(HOME, ".claude", "coord"))
+SESSIONS = os.environ.get("COORD_SESSIONS", os.path.join(HOME, ".claude", "sessions"))
+STATE = os.path.join(DIR, "queues.json")
+ME = os.environ.get("COORD_SID") or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+SELF = os.path.abspath(__file__)
+CMD = SELF.replace(HOME, "~", 1)
+LABEL = {"hold": "has it", "lent": "lent it out", "borrow": "borrowing", "wait": "waiting"}
+USAGE = """usage: coord <command> [KEY] [note]
+  claim KEY [note]  take KEY, or join its queue (exit 0 = yours, 3 = queued)
+  wait KEY          block until KEY is yours; run it in the background
+  release KEY       leave KEY's queue; says who has it next
+  lend KEY [note]   let the next session borrow KEY while you wait on it; note = what not to touch
+  back KEY          end the loan; then `coord wait KEY` until the borrower gives it back
+  yield KEY         give a borrowed KEY back and rejoin the end of the queue
+  status [KEY]      show the queues
+KEY is a path (file or folder), device:<serial> or app:<id>."""
+
+LIVE = {}
+COMPLETE = True
+
+
+def live_sessions():
+    # shortcut: reads Claude Code's internal ~/.claude/sessions/<pid>.json; if that format
+    # changes, other sessions look gone and coord stops blocking. Upgrade if Claude Code ships a lock API.
+    global LIVE, COMPLETE
+    LIVE, COMPLETE = {}, True
+    for f in glob.glob(os.path.join(SESSIONS, "*.json")):
+        try:
+            with open(f) as fh:
+                s = json.load(fh)
+            os.kill(int(s["pid"]), 0)
+        except ProcessLookupError:
+            continue
+        except (OSError, ValueError, KeyError, TypeError):
+            COMPLETE = False  # file mid-write: keep everyone's entries this round
+            continue
+        LIVE[s["sessionId"]] = s.get("name") or s["sessionId"][:8]
+    if ME:
+        LIVE.setdefault(ME, ME[:8])
+
+
+def name(e):
+    return LIVE.get(e["sid"], e["sid"][:8])
+
+
+def key(arg):
+    if ":" in arg.split("/", 1)[0]:
+        return arg  # device:..., app:...
+    return os.path.realpath(os.path.expanduser(arg))
+
+
+def mine(q):
+    return next((e for e in q if e["sid"] == ME), None)
+
+
+def user(q):
+    """The entry that may use the resource right now, if any."""
+    b = next((e for e in q if e["state"] == "borrow"), None)
+    return b or (q[0] if q and q[0]["state"] == "hold" else None)
+
+
+def tidy(q):
+    if COMPLETE:
+        q[:] = [e for e in q if e["sid"] in LIVE]
+    if not q:
+        return
+    if q[0]["state"] in ("wait", "borrow"):
+        q[0]["state"] = "hold"
+    if q[0]["state"] == "lent" and not any(e["state"] == "borrow" for e in q):
+        w = next((e for e in q[1:] if e["state"] == "wait"), None)
+        if w:
+            w["state"] = "borrow"
+
+
+def locked(fn):
+    os.makedirs(DIR, exist_ok=True)
+    with open(os.path.join(DIR, "lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            with open(STATE) as fh:
+                qs = json.load(fh)
+        except FileNotFoundError:
+            qs = {}
+        live_sessions()
+        for q in qs.values():
+            tidy(q)
+        out = fn(qs)
+        tmp = STATE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({k: q for k, q in qs.items() if q}, fh, indent=1)
+        os.replace(tmp, STATE)
+        return out
+
+
+def report(k, q):
+    e, u = mine(q), user(q)
+    if e is None:
+        return f"you are not in the queue for {k}."
+    if u is e and e["state"] == "borrow":
+        return (f"you are borrowing {k} from {name(q[0])}. Their note: {q[0]['note'] or 'none'}. "
+                f"Run `{CMD} yield {k}` as soon as they ask for it back, or `{CMD} release {k}` when done.")
+    if u is e:
+        return f"you have {k}. Run `{CMD} release {k}` as soon as you are done."
+    if e["state"] == "lent":
+        who = f"{name(u)} is borrowing it" if u else "nobody is borrowing it yet"
+        return f"you lent {k}; {who}. Run `{CMD} back {k}` when you need it again."
+    if e["state"] == "hold":
+        return (f"{name(u)} still has {k} on loan. SendMessage {name(u)} to run `{CMD} yield {k}`, "
+                f"then run `{CMD} wait {k}` in the background.")
+    ahead = q.index(e)
+    who = name(u) if u else name(q[0])
+    note = f" ({u['note']})" if u and u["note"] else ""
+    return (f"queued for {k}, {ahead} ahead of you; {who} {LABEL[(u or q[0])['state']]}{note}. "
+            f"Run `{CMD} wait {k}` in the background, SendMessage {who} that you are waiting, "
+            f"and work on something else until the wait finishes.")
+
+
+def overlaps(k, qs):
+    if not k.startswith("/"):
+        return []
+    out = []
+    for k2, q2 in qs.items():
+        u = user(q2)
+        if k2 != k and u and u["sid"] != ME and (k2.startswith(k + "/") or k.startswith(k2 + "/")):
+            out.append(f"note: {name(u)} {LABEL[u['state']]} {k2}; edits there stay blocked until it is free.")
+    return out
+
+
+def run(cmd, k, note):
+    def go(qs):
+        q = qs.setdefault(k, [])
+        e = mine(q)
+        if cmd == "claim":
+            if e is None:
+                q.append({"sid": ME, "state": "wait" if q else "hold", "since": int(time.time()), "note": note})
+                tidy(q)
+            elif note:
+                e["note"] = note
+            return (0 if user(q) is mine(q) else 3), "\n".join([report(k, q)] + overlaps(k, qs))
+        if cmd == "wait":
+            if e is None:
+                return 1, f"you are not in the queue for {k}; run `{CMD} claim {k}` first."
+            return (0, report(k, q)) if user(q) is e else (None, "")
+        if cmd == "release":
+            if e is None:
+                return 1, report(k, q)
+            first = q[0] is e or user(q) is e
+            q.remove(e)
+            tidy(q)
+            u = user(q)
+            nxt = f" {name(u)} has it now; SendMessage them that it is free." if first and u else ""
+            return 0, f"released {k}.{nxt}"
+        if cmd == "lend":
+            if not (q and q[0] is e and e["state"] in ("hold", "lent")):
+                return 1, f"you can only lend {k} while you hold it. " + report(k, q)
+            e["state"], e["note"] = "lent", note or e["note"]
+            tidy(q)
+            u = user(q)
+            tell = f" SendMessage {name(u)} that they can use it now." if u else ""
+            return 0, report(k, q) + tell
+        if cmd == "back":
+            if not (e and e["state"] == "lent"):
+                return 1, f"you have not lent {k}. " + report(k, q)
+            e["state"] = "hold"
+            return (0 if user(q) is e else 3), report(k, q)
+        if cmd == "yield":
+            if not (e and e["state"] == "borrow"):
+                return 1, f"you are not borrowing {k}. " + report(k, q)
+            q.remove(e)
+            q.append(dict(e, state="wait"))
+            tidy(q)
+            u = user(q)
+            return 0, f"gave {k} back; you are queued again." + (f" {name(u)} has it now." if u else "")
+        return 2, USAGE
+
+    return locked(go)
+
+
+def status(k):
+    def go(qs):
+        lines = []
+        for k2, q2 in sorted(qs.items()):
+            if k and k2 != k:
+                continue
+            lines.append(k2)
+            for i, e in enumerate(q2, 1):
+                mins = (int(time.time()) - e["since"]) // 60
+                age = f"{mins // 60}h{mins % 60:02d}m" if mins >= 60 else f"{mins}m"
+                you = " (you)" if e["sid"] == ME else ""
+                lines.append(f"  {i}. {name(e)}{you}  {LABEL[e['state']]}  {age}  {e['note']}".rstrip())
+        return "\n".join(lines) or "no queues."
+
+    return locked(go)
+
+
+def hook_edit():
+    """PreToolUse on Edit/Write: refuse when another session has the file or a folder above it."""
+    global ME
+    try:
+        d = json.load(sys.stdin)
+        ME = d.get("session_id") or ME
+        ti = d.get("tool_input") or {}
+        f = ti.get("file_path") or ti.get("notebook_path")
+        if not ME or not f:
+            return 0
+        k = key(f)
+
+        def go(qs):
+            for k2, q2 in qs.items():
+                u = user(q2)
+                if u and u["sid"] != ME and (k2 == k or k.startswith(k2.rstrip("/") + "/")):
+                    via = f" (it holds {k2})" if k2 != k else ""
+                    note = f": {u['note']}" if u["note"] else ""
+                    return (f"coord: {f} is in use by session {name(u)}{via}{note}. Do not edit it now. "
+                            f"Run `{CMD} claim {k2}` to queue, start `{CMD} wait {k2}` in the background, "
+                            f"SendMessage {name(u)} that you are waiting, and work on something else until the wait finishes.")
+            q = qs.setdefault(k, [])
+            if mine(q) is None:
+                q.append({"sid": ME, "state": "wait" if q else "hold", "since": int(time.time()), "note": "editing"})
+                tidy(q)
+            return None
+
+        msg = locked(go)
+    except Exception:
+        return 0  # a coord bug must never block edits
+    if msg:
+        print(msg, file=sys.stderr)
+        return 2
+    return 0
+
+
+def hook_stop():
+    """Stop: free the files this session held during the turn; folders, apps and devices stay claimed."""
+    global ME
+    try:
+        ME = json.load(sys.stdin).get("session_id") or ME
+
+        def go(qs):
+            for k2, q2 in qs.items():
+                e = mine(q2)
+                if e and e["state"] != "wait" and os.path.isfile(k2):
+                    q2.remove(e)
+                    tidy(q2)
+
+        if ME:
+            locked(go)
+    except Exception:
+        pass
+    return 0
+
+
+def hook_start():
+    """SessionStart: give the session the protocol, with this install's path to coord."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(SELF)), "PROTOCOL.md")) as fh:
+            print(fh.read().replace("{coord}", CMD))
+    except OSError:
+        pass
+    return 0
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "help"
+    if cmd == "hook-start":
+        return hook_start()
+    if cmd == "hook-edit":
+        return hook_edit()
+    if cmd == "hook-stop":
+        return hook_stop()
+    if cmd in ("help", "-h", "--help"):
+        print(USAGE)
+        return 0
+    if not ME:
+        print("coord: no session id; CLAUDE_CODE_SESSION_ID is unset.", file=sys.stderr)
+        return 2
+    k = key(argv[2]) if len(argv) > 2 else None
+    if cmd == "status":
+        print(status(k))
+        return 0
+    if k is None:
+        print(USAGE, file=sys.stderr)
+        return 2
+    while True:
+        code, msg = run(cmd, k, " ".join(argv[3:]))
+        if code is not None:
+            print(msg)
+            return code
+        time.sleep(3)  # wait: poll outside the lock
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
