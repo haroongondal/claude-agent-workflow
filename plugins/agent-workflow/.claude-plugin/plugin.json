@@ -1,6 +1,6 @@
 {
   "name": "agent-workflow",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Running several subagents in one repo without lost edits (parallel-agents-coord, with a filelock helper), splitting a build into context-sized phases (phased-orchestration), and a hook that warns at 85% of the context window.",
   "author": { "name": "haroongondal" },
   "license": "MIT",

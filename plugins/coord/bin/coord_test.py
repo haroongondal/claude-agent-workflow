@@ -90,6 +90,17 @@ class Coord(unittest.TestCase):
         self.assertEqual(self.hook("hook-edit", "b", self.file)[0], 2)
         self.assertEqual(self.hook("hook-edit", "a", self.file)[0], 0)
 
+    def test_stop_frees_edit_claims_on_deleted_or_never_created_files(self):
+        gone = os.path.join(self.dir, "gone.txt")
+        never = os.path.join(self.dir, "never.txt")
+        self.assertEqual(self.hook("hook-edit", "a", gone)[0], 0)
+        self.assertEqual(self.hook("hook-edit", "a", never)[0], 0)
+        open(gone, "w").close()
+        os.remove(gone)
+        self.hook("hook-stop", "a")
+        self.assertEqual(self.hook("hook-edit", "b", gone)[0], 0)
+        self.assertEqual(self.hook("hook-edit", "b", never)[0], 0)
+
     def test_hook_fails_open_on_garbage(self):
         r = subprocess.run([sys.executable, COORD, "hook-edit"], env=self.env, input="not json",
                            capture_output=True, text=True)

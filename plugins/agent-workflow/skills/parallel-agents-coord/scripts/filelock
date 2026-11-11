@@ -1,29 +1,56 @@
 #!/bin/bash
 # Locks for subagents of ONE Claude session (coord sees them all as one holder). A lock is a symlink whose target
 # is "OWNER|EPOCH": one atomic, exclusive syscall, so never two winners and never a lock without an owner.
-USAGE='usage: filelock acquire KEY OWNER [WAIT_S=540]  exit 0 yours (or already yours), 3 timed out (prints holder and age)
+USAGE='usage: filelock acquire KEY OWNER [WAIT_S=100]  exit 0 yours (or already yours), 3 timed out (prints holder and age)
        filelock release KEY OWNER               exit 0 released, 4 not held by OWNER
        filelock break KEY                       controller only: free a lock whose holder finished or died
        filelock status                          every lock with its holder and age
-KEY: an absolute file path, or the app folder for build/test/browser runs. Set FILELOCK_ROOT to a per-task folder.
-WAIT_S stays under the Bash tool limit (600 s) so a timeout returns exit 3 instead of being killed.'
-ROOT="${FILELOCK_ROOT:-${TMPDIR:-/tmp}/filelock}"; mkdir -p "$ROOT"
-cmd="$1"; key="$2"; owner="$3"; wait_s="${4:-540}"
-link="$ROOT/$(printf '%s' "$key" | tr '/ ' '__')"
-who() { local v; v=$(readlink "$1" 2>/dev/null) || { [ -e "$1" ] && echo "unknown (old folder-style lock: filelock break it)" || echo nobody; return; }
-        echo "${v%|*} for $(( ($(date +%s) - ${v##*|}) / 60 )) min"; }
+KEY: an absolute file path (normalised: //, . and .. and symlinked directories give one key) or a plain name
+without "/" such as chrome or device:<serial>. A relative path containing "/" is refused (exit 2).
+OWNER: unique per agent. Two agents with the same OWNER do not exclude each other.
+WAIT_S: 0 tries once and returns at once. Above about 100 s run the call with the Bash tool timeout set to 600000
+(the default 120 s moves the call to the background and the acquire keeps polling unseen). Keep WAIT_S at 540 or less.
+Set FILELOCK_ROOT to a per-task folder.'
+ROOT="${FILELOCK_ROOT:-${TMPDIR:-/tmp}/filelock}"
+cmd="$1"; key="$2"; owner="$3"; wait_s="${4:-100}"
+
+norm() {
+  case "$1" in /*) ;; */*) return 1 ;; *) printf '%s' "$1"; return 0 ;; esac
+  local part lex dir IFS=/ st=(); set -f
+  for part in $1; do
+    case "$part" in ''|.) ;; ..) [ ${#st[@]} -gt 0 ] && unset 'st[${#st[@]}-1]' ;; *) st+=("$part") ;; esac
+  done
+  set +f; lex="/${st[*]}"
+  [ ${#st[@]} -le 1 ] && { printf '%s' "$lex"; return 0; }
+  dir="${lex%/*}"; [ -d "$dir" ] && dir=$(cd "$dir" && pwd -P)
+  printf '%s/%s' "${dir%/}" "${lex##*/}"
+}
+enc() { local k="${1//%/%25}"; k="${k//\//%2F}"; k="${k// /%20}"
+        [ ${#k} -gt 200 ] && k="${k:0:100}~$(printf '%s' "$1" | shasum -a 256 | cut -c1-24)"; printf '%s' "$k"; }
+dec() { local n="${1%%~*}"; n=$(printf '%b' "${n//%/\\x}")
+        case "$1" in *~*) printf '%s... (long key, hashed)' "$n" ;; *) printf '%s' "$n" ;; esac; }
+who() { local v age; v=$(readlink "$1" 2>/dev/null) || { [ -e "$1" ] && echo "unknown (old folder-style lock: filelock break it)" || echo nobody; return; }
+        age=$(( $(date +%s) - ${v##*|} )); [ "$age" -lt 120 ] && age="$age s" || age="$((age / 60)) min"
+        echo "${v%|*} for $age"; }
+
+case "$cmd" in
+  acquire|release|break)
+    { [ -n "$key" ] && { [ "$cmd" = break ] || [ -n "$owner" ]; }; } || { echo "$USAGE"; exit 2; }
+    key=$(norm "$key") || { echo "KEY must be an absolute path or a plain name without '/': $2"; exit 2; }
+    link="$ROOT/$(enc "$key")" ;;
+esac
 mine() { v=$(readlink "$link" 2>/dev/null) && [ "${v%|*}" = "$owner" ]; }
-case "$cmd" in acquire|release) [ -n "$key" ] && [ -n "$owner" ] || { echo "$USAGE"; exit 2; } ;;
-  break) [ -n "$key" ] || { echo "$USAGE"; exit 2; } ;; esac
 case "$cmd" in
   acquire)
-    end=$((SECONDS + wait_s))
+    case "$wait_s" in ''|*[!0-9]*) echo "$USAGE"; exit 2 ;; esac
+    mkdir -p "$ROOT"; end=$((SECONDS + wait_s))
     until mine || ln -sn "$owner|$(date +%s)" "$link" 2>/dev/null && mine; do
-      [ "$SECONDS" -ge "$end" ] && { echo "timed out; held by $(who "$link")"; exit 3; }
-      sleep 5
+      left=$((end - SECONDS))
+      [ "$left" -le 0 ] && { echo "timed out; held by $(who "$link")"; exit 3; }
+      sleep $((left < 5 ? left : 5))
     done; exit 0 ;;
   release) mine || { echo "not held by $owner"; exit 4; }; rm "$link"; exit 0 ;;
   break) echo "freed $key (was held by $(who "$link"))"; rm -rf "$link"; exit 0 ;;
-  status) for l in "$ROOT"/*; do { [ -e "$l" ] || [ -L "$l" ]; } && echo "$(basename "$l")  held by $(who "$l")"; done; exit 0 ;;
+  status) for l in "$ROOT"/*; do { [ -e "$l" ] || [ -L "$l" ]; } && echo "$(dec "$(basename "$l")")  held by $(who "$l")"; done; exit 0 ;;
   *) echo "$USAGE"; exit 2 ;;
 esac

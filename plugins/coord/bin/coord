@@ -232,7 +232,7 @@ def hook_edit():
                             f"SendMessage {name(u)} that you are waiting, and work on something else until the wait finishes.")
             q = qs.setdefault(k, [])
             if mine(q) is None:
-                q.append({"sid": ME, "state": "wait" if q else "hold", "since": int(time.time()), "note": "editing"})
+                q.append({"sid": ME, "state": "wait" if q else "hold", "since": int(time.time()), "note": "editing", "auto": True})
                 tidy(q)
             return None
 
@@ -246,7 +246,7 @@ def hook_edit():
 
 
 def hook_stop():
-    """Stop: free the files this session held during the turn; folders, apps and devices stay claimed."""
+    """Stop: free the files this session held during the turn (also ones deleted or never created); folders, apps and devices stay claimed."""
     global ME
     try:
         ME = json.load(sys.stdin).get("session_id") or ME
@@ -254,7 +254,7 @@ def hook_stop():
         def go(qs):
             for k2, q2 in qs.items():
                 e = mine(q2)
-                if e and e["state"] != "wait" and os.path.isfile(k2):
+                if e and e["state"] != "wait" and (e.get("auto") or os.path.isfile(k2)):
                     q2.remove(e)
                     tidy(q2)
 
